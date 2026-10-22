@@ -1,0 +1,343 @@
+/dts-v1/;
+
+#include "ipq5018.dtsi"
+#include "ipq5018-ess.dtsi"
+#include "ipq5018-qcn6122.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "H3C RT3000";
+	compatible = "h3c,rt3000", "qcom,ipq5018";
+
+	aliases {
+		ethernet0 = &dp1;
+		ethernet1 = &dp2;
+		label-mac-device = &dp1;
+		led-boot = &led_status;
+		led-failsafe = &led_status;
+		led-running = &led_status;
+		led-upgrade = &led_status;
+		serial0 = &blsp1_uart1;
+	};
+
+	chosen {
+		bootargs-append = "ubi.mtd=rootfs root=/dev/ubiblock0_1 rootfstype=squashfs rootwait swiotlb=1 coherent_pool=2M";
+		stdout-path = "serial0:115200n8";
+	};
+
+	keys {
+		compatible = "gpio-keys";
+		pinctrl-0 = <&button_pins>;
+		pinctrl-names = "default";
+
+		button-reset {
+			label = "reset";
+			gpios = <&tlmm 34 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+
+		button-wps {
+			label = "wps";
+			gpios = <&tlmm 38 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WPS_BUTTON>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		pinctrl-0 = <&led_pins>;
+		pinctrl-names = "default";
+
+		led_status: status {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&tlmm 19 GPIO_ACTIVE_HIGH>;
+		};
+	};
+};
+
+&switch {
+	status = "okay";
+	switch_mac_mode = <MAC_MODE_SGMII_CHANNEL0>;
+
+	qcom,port_phyinfo {
+		port@0 {
+			port_id = <1>;
+			mdiobus = <&mdio0>;
+			phy_address = <7>;
+		};
+
+		port@1 {
+			port_id = <2>;
+			forced-speed = <1000>;
+			forced-duplex = <1>;
+		};
+	};
+};
+
+&dp1 {
+	status = "okay";
+};
+
+&dp2 {
+	status = "okay";
+
+	fixed-link {
+		speed = <1000>;
+		full-duplex;
+	};
+};
+
+&mdio0 {
+	status = "okay";
+};
+
+&mdio1 {
+	status = "okay";
+	pinctrl-0 = <&mdio1_pins>;
+	pinctrl-names = "default";
+	reset-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
+	/* 内核 6.12 起 mdio-ipq4019 会用寄存器里的分频值反推 MDC 速率，
+	 * 厂商 SSDK 已经把 MDIO1 的分频改成非 2 的幂，反推出来对不上就直接
+	 * 返回 -EINVAL（日志: probe failed with error -22）。这里把速率写死，
+	 * 100MHz/64 = 1562500Hz，正好落在驱动支持的 8..256 分频表里。 */
+	clock-frequency = <1562500>;
+
+	qca8337_phy0: ethernet-phy@0 {
+		reg = <0>;
+	};
+
+	qca8337_phy1: ethernet-phy@1 {
+		reg = <1>;
+	};
+
+	qca8337_phy2: ethernet-phy@2 {
+		reg = <2>;
+	};
+
+	switch0: ethernet-switch@10 {
+		compatible = "qca,qca8337";
+		/* MDIO 管理地址 0x10 —— 实机验证通过（run 39550398658 实刷）：
+		 *   qca8k 90000.mdio-1:10 lan1: PHY [90000.mdio-1:00] 8337 internal PHY
+		 *   qca8k 90000.mdio-1:10 lan2: PHY [90000.mdio-1:01]
+		 *   qca8k 90000.mdio-1:10 lan3: PHY [90000.mdio-1:02]
+		 * 三个值（地址 0x10 / PHY 0-1-2 / 必须显式 phy-handle）都是实刷量出来的，
+		 * 不要再按任何 DTB 去"修正"它。 */
+		reg = <0x10>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@1 {
+				reg = <1>;
+				label = "lan1";
+				phy-handle = <&qca8337_phy0>;
+			};
+
+			port@2 {
+				reg = <2>;
+				label = "lan2";
+				phy-handle = <&qca8337_phy1>;
+			};
+
+			port@3 {
+				reg = <3>;
+				label = "lan3";
+				phy-handle = <&qca8337_phy2>;
+			};
+
+			port@6 {
+				reg = <6>;
+				label = "cpu";
+				ethernet = <&dp2>;
+				phy-mode = "sgmii";
+				qca,sgmii-enable-pll;
+
+				fixed-link {
+					speed = <1000>;
+					full-duplex;
+				};
+			};
+		};
+	};
+};
+
+&sleep_clk {
+	clock-frequency = <32000>;
+};
+
+&xo_board_clk {
+	clock-div = <4>;
+	clock-mult = <1>;
+};
+
+&blsp1_uart1 {
+	pinctrl-0 = <&serial_0_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&crypto {
+	status = "okay";
+};
+
+&cryptobam {
+	status = "okay";
+};
+
+&prng {
+	status = "okay";
+};
+
+&qfprom {
+	status = "okay";
+};
+
+&qpic_bam {
+	status = "okay";
+};
+
+&qpic_nand {
+	pinctrl-0 = <&qpic_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	nand@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		nand-ecc-engine = <&qpic_nand>;
+		nand-bus-width = <8>;
+
+		partitions {
+			compatible = "qcom,smem-part";
+
+			partition-0-art {
+				label = "0:art";
+				read-only;
+			};
+		};
+	};
+};
+
+&tlmm {
+	mdio1_pins: mdio-state {
+		mdc-pins {
+			pins = "gpio36";
+			function = "mdc";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+
+		mdio-pins {
+			pins = "gpio37";
+			function = "mdio";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+	};
+
+	led_pins: led-pins {
+		pins = "gpio19";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-down;
+	};
+
+	button_pins: button-pins {
+		pins = "gpio34", "gpio38";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+	};
+
+	qpic_pins: qpic-state {
+		clock-pins {
+			pins = "gpio9";
+			function = "qspi_clk";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		cs-pins {
+			pins = "gpio8";
+			function = "qspi_cs";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data-pins {
+			pins = "gpio4", "gpio5", "gpio6", "gpio7";
+			function = "qspi_data";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+
+	serial_0_pins: uart0-state {
+		pins = "gpio28", "gpio29";
+		function = "blsp0_uart1";
+		drive-strength = <8>;
+		bias-disable;
+	};
+};
+
+&q6_region {
+	/*
+	 * 内存分配重构（256MB 机型标准）：上游 ipq5018-qcn6122.dtsi 及
+	 * GL-B3000 / RAX3000Q / AX830 等同类 256MB 机型统一用 48MB。
+	 * 原 69MB 只用到 ~20MB 固件，浪费 49MB；缩到 48MB 后系统内存
+	 * 从 163MB 涨到 ~185MB，足以容纳双频 ath11k 的 dma_alloc（~85MB）
+	 * + 系统（~54MB）+ 双 AP/STA 运行开销。
+	 */
+	reg = <0x0 0x4b000000 0x0 0x3000000>;
+};
+
+/*
+ * 2.4G（IPQ5018 内置射频，pd-1）。实测可用：AP + STA 中继同时工作。
+ * 写法对齐上游已支持的 ipq5018+QCN6122 机型（mx6200 / gl-x2000）：
+ *   - 不给 memory-region：fixed_mem_region 为假时驱动自己 dma_alloc，
+ *     给了反而让三路 PD 共用同一块 DDR 起始地址；
+ *   - qcom,ath11k-fw-memory-mode = 1（=2 会被驱动判非法并回落）；
+ *   - qcom,bdf-addr 用厂商 DTB 里 wifi@c000000 的值。
+ */
+&wifi {
+	status = "okay";
+	qcom,rproc = <&q6_wcss_pd1>;
+	qcom,userpd-subsys-name = "q6v5_wcss_userpd1";
+	qcom,ath11k-calibration-variant = "H3C-RT3000-IPQ5018";
+	qcom,ath11k-fw-memory-mode = <1>;
+	qcom,bdf-addr = <0x4c400000>;
+};
+
+/*
+ * 5G（QCN6122，pd-2）：启用，与 2.4G 组成双频双 AP。
+ * 原厂 RT3000 DTB 中 wifi1@c000000（board id 0x50、userpd2）的
+ * BDF 地址为 0x4d300000，M3 dump 地址为 0x4e200000。
+ * fw-memory-mode = 2（8 vdev/128 peer + 关 coldboot cal，最省内存；
+ * 该路实测 mode 2 可用，且需 mode 2 才能避免 ANTENNACHAIN 断言）。
+ */
+&wifi1 {
+	status = "okay";
+	qcom,rproc = <&q6_wcss_pd2>;
+	qcom,userpd-subsys-name = "q6v5_wcss_userpd2";
+	qcom,ath11k-calibration-variant = "H3C-RT3000-QCN6122-0";
+	qcom,ath11k-fw-memory-mode = <2>;
+	qcom,bdf-addr = <0x4d300000>;
+	qcom,m3-dump-addr = <0x4e200000>;
+};
+
+&wifi2 {
+	/* 第三颗（第二片 QCN6122）本机没有，原厂 DTB 里是 okay 但
+	 * 板上没这路射频，保持关闭避免抢内存。 */
+	status = "disabled";
+	qcom,ath11k-calibration-variant = "H3C-RT3000-QCN6122-1";
+	qcom,ath11k-fw-memory-mode = <1>;
+	qcom,bdf-addr = <0x4e500000>;
+	qcom,m3-dump-addr = <0x4f200000>;
+};

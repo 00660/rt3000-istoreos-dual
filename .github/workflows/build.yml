@@ -1,0 +1,209 @@
+name: RT3000 iStoreOS build benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out private porting inputs
+        uses: actions/checkout@v4
+        with:
+          path: porting
+
+      - name: Record runner resources
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          {
+            echo "CPUs: $(nproc)"
+            echo "Memory:"
+            free -h
+            echo "Disk before cleanup:"
+            df -h /
+          } | tee "$GITHUB_WORKSPACE/results/runner.txt"
+
+      - name: Reclaim unused runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h / | tee -a "$GITHUB_WORKSPACE/results/runner.txt"
+
+      - name: Install OpenWrt build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev file wget
+
+      - name: Fetch the exact iStoreOS base revision
+        env:
+          OPENWRT_BASE: 96c7500f01945e2652ff71478aa74afea5503ccd
+        run: |
+          git init openwrt
+          git -C openwrt remote add origin https://github.com/istoreos/istoreos.git
+          git -C openwrt fetch --depth=1 origin "$OPENWRT_BASE"
+          git -C openwrt checkout --detach FETCH_HEAD
+
+      - name: Apply RT3000 changes and build configuration
+        run: |
+          git -C openwrt apply --check "$GITHUB_WORKSPACE/porting/changes.patch"
+          git -C openwrt apply "$GITHUB_WORKSPACE/porting/changes.patch"
+          cp -a porting/newfiles/. openwrt/
+          # 直接落盘的 base-files 不会自动生成 rc.d 软链，这里显式补上
+          chmod 0755 openwrt/target/linux/qualcommax/ipq50xx/base-files/etc/init.d/setmac
+          mkdir -p openwrt/target/linux/qualcommax/ipq50xx/base-files/etc/rc.d
+          ln -sf ../init.d/setmac openwrt/target/linux/qualcommax/ipq50xx/base-files/etc/rc.d/S19setmac
+          cp porting/.config openwrt/.config
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+          {
+            echo "Resolved RT3000 profile and explicit container package settings:"
+            grep -E '^(CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_h3c_rt3000|CONFIG_TARGET_PROFILE|CONFIG_PACKAGE_luci-app-store|CONFIG_PACKAGE_(docker|dockerd|docker-compose|containerd|runc|luci-app-dockerman|luci-i18n-dockerman-zh-cn))=' .config || true
+            echo "Resolved RT3000 wireless packages:"
+            grep -E '^CONFIG_PACKAGE_(ath11k-firmware-ipq5018-qcn6122|ipq-wifi-rt3000)=' .config || true
+            echo "Resolved LuCI web-management packages:"
+            grep -E '^CONFIG_(LUCI_LANG_zh_Hans|PACKAGE_(istoreos-files|libustream-mbedtls|luci|luci-ssl|luci-light|luci-base|luci-lua-runtime|luci-mod-admin-full|luci-mod-network|luci-mod-status|luci-mod-system|luci-app-firewall|luci-app-package-manager|luci-proto-ppp|luci-theme-argon|luci-theme-bootstrap|rpcd-mod-luci|rpcd-mod-rrdns|uhttpd|uhttpd-mod-ubus|px5g-mbedtls|luci-i18n-base-zh-cn|luci-i18n-argon-zh-cn|luci-i18n-firewall-zh-cn|luci-i18n-package-manager-zh-cn))=' .config || true
+            echo "Resolved iStore packages and Kconfig dependencies:"
+            grep -E '^CONFIG_(DEFAULT_luci-app-store|PACKAGE_(luci-app-store|luci-lib-taskd|luci-lib-xterm|taskd|TAR_XZ|xz-utils|tar)|LIBCURL_LDAP|USE_GLIBC)=' .config || true
+            echo "luci-app-store Kconfig dependency definition:"
+            sed -n '/^[[:space:]]*config PACKAGE_luci-app-store$/,/^[[:space:]]*help$/p' tmp/.config-package.in
+            echo "Official LuCI SSL collection dependencies:"
+            sed -n '/^[[:space:]]*config PACKAGE_luci-ssl$/,/^[[:space:]]*help$/p' tmp/.config-package.in
+            echo "Official iStoreOS default package rule:"
+            grep -F 'DEFAULT_PACKAGES += luci-app-store' include/target.mk
+            echo "RT3000 device package list:"
+            sed -n '/^define Device\/h3c_rt3000$/,/^endef$/p' target/linux/qualcommax/image/ipq50xx.mk
+          } | tee "$GITHUB_WORKSPACE/results/config.txt"
+          grep -qx 'CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_h3c_rt3000=y' .config
+          grep -qx 'CONFIG_LUCI_LANG_zh_Hans=y' .config
+          grep -Fq 'DEFAULT_PACKAGES += luci-app-store xz-utils luci-ssl' include/target.mk
+          for package in \
+            ath11k-firmware-ipq5018-qcn6122 ipq-wifi-rt3000 kmod-dsa-qca8k \
+            istoreos-files libustream-mbedtls luci-ssl luci-light \
+            luci-base luci-lua-runtime luci-mod-admin-full luci-mod-network \
+            luci-mod-status luci-mod-system luci-app-firewall luci-app-package-manager \
+            luci-proto-ppp luci-theme-argon luci-theme-bootstrap \
+            rpcd-mod-luci rpcd-mod-rrdns uhttpd uhttpd-mod-ubus px5g-mbedtls \
+            luci-i18n-base-zh-cn luci-i18n-argon-zh-cn \
+            luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn \
+            xz-utils luci-app-store luci-lib-taskd luci-lib-xterm taskd; do
+            if ! grep -qx "CONFIG_PACKAGE_${package}=y" .config; then
+              echo "Required RT3000 package is not enabled after make defconfig: ${package}"
+              exit 1
+            fi
+          done
+          grep -Fq -- '-docker -dockerd -docker-compose -containerd -runc' target/linux/qualcommax/image/ipq50xx.mk
+          grep -Fq -- '-luci-app-dockerman -luci-i18n-dockerman-zh-cn' target/linux/qualcommax/image/ipq50xx.mk
+          if grep -Eq '^CONFIG_PACKAGE_(docker|dockerd|docker-compose|containerd|runc|luci-app-dockerman|luci-i18n-dockerman-zh-cn)=y$' .config; then
+            echo "Docker packages must be excluded from the RT3000 image."
+            exit 1
+          fi
+
+      - name: Patch iStoreOS overlay detection for UBI/NAND
+        run: |
+          set -e
+          mapfile -t files < <(find openwrt -path '*files/lib/functions/istoreos-boot.sh')
+          [ "${#files[@]}" -ge 1 ] || { echo "istoreos-boot.sh not found"; exit 1; }
+          for f in "${files[@]}"; do
+            echo "patching $f"
+            python3 - "$f" <<'PY'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'rootfs_data UBI volume' in s:
+              print('already patched')
+              sys.exit(0)
+          insert = (
+              "\t# UBI/NAND targets: the overlay lives in the rootfs_data UBI volume\n"
+              "\tlocal _uv\n"
+              "\tfor _uv in /sys/class/ubi/ubi*_*; do\n"
+              "\t\t[ -r \"$_uv/name\" ] || continue\n"
+              "\t\tif [ \"$(cat $_uv/name 2>/dev/null)\" = \"rootfs_data\" ]; then\n"
+              "\t\t\tOVERLAY_DEV=\"/dev/${_uv##*/}\"\n"
+              "\t\t\tOVERLAY_FS=ubifs\n"
+              "\t\t\tFSTYPE=ubifs\n"
+              "\t\t\treturn 0\n"
+              "\t\tfi\n"
+              "\tdone\n"
+          )
+          pat = re.compile(r'(_get_overlay_partition_default\(\)[ \t]*\n\{[ \t]*\n)')
+          s2, n = pat.subn(lambda m: m.group(1) + insert, s, count=1)
+          if n != 1:
+              print('anchor not found')
+              sys.exit(1)
+          open(p, 'w', encoding='utf-8').write(s2)
+          print('ok')
+          PY
+          done
+          grep -n -A8 'rootfs_data UBI volume' "${files[0]}"
+
+      - name: Build firmware
+        run: |
+          set +e
+          start=$(date +%s)
+          FORCE_UNSAFE_CONFIGURE=1 make -C openwrt -j4 2>&1 | tee "$GITHUB_WORKSPACE/results/build.log"
+          result=${PIPESTATUS[0]}
+          end=$(date +%s)
+          set -e
+          elapsed=$((end - start))
+          {
+            echo "Build exit code: $result"
+            echo "Build seconds: $elapsed"
+            echo "Build minutes: $((elapsed / 60))"
+            echo "Disk after build:"
+            df -h /
+          } | tee -a "$GITHUB_WORKSPACE/results/runner.txt" "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+
+      - name: List firmware images
+        if: success()
+        run: |
+          manifest="$(find openwrt/bin/targets/qualcommax/ipq50xx -maxdepth 1 -type f -name 'istoreos-qualcommax-ipq50xx-h3c_rt3000.manifest' -print -quit)"
+          if [ -z "$manifest" ]; then
+            echo "RT3000 firmware manifest is missing."
+            exit 1
+          fi
+          for package in \
+            ath11k-firmware-ipq5018-qcn6122 ipq-wifi-rt3000 kmod-dsa-qca8k \
+            istoreos-files libustream-mbedtls20201210 luci-base luci-lua-runtime \
+            luci-mod-admin-full luci-mod-network luci-mod-status luci-mod-system \
+            luci-app-firewall luci-app-package-manager firewall4 \
+            luci-proto-ppp luci-theme-argon luci-theme-bootstrap \
+            rpcd-mod-luci rpcd-mod-rrdns uhttpd uhttpd-mod-ubus px5g-mbedtls \
+            luci-i18n-base-zh-cn luci-i18n-argon-zh-cn \
+            luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn \
+            xz-utils luci-app-store luci-lib-taskd luci-lib-xterm taskd; do
+            if ! grep -Eq "^${package} - " "$manifest"; then
+              echo "Required RT3000 package is missing from the firmware manifest: ${package}"
+              exit 1
+            fi
+          done
+          if grep -Eq '^(docker|dockerd|docker-compose|containerd|runc|luci-app-dockerman|luci-i18n-dockerman-zh-cn) - ' "$manifest"; then
+            echo "Docker/Dockerman package found in the RT3000 firmware manifest."
+            grep -E '^(docker|dockerd|docker-compose|containerd|runc|luci-app-dockerman|luci-i18n-dockerman-zh-cn) - ' "$manifest"
+            exit 1
+          fi
+          grep -E '^(ath11k-firmware-ipq5018-qcn6122|ipq-wifi-rt3000|istoreos-files|libustream-mbedtls20201210|luci-base|luci-lua-runtime|luci-mod-admin-full|luci-app-firewall|luci-app-package-manager|luci-proto-ppp|luci-theme-argon|luci-theme-bootstrap|rpcd-mod-luci|rpcd-mod-rrdns|uhttpd|uhttpd-mod-ubus|px5g-mbedtls|luci-i18n-base-zh-cn|luci-i18n-argon-zh-cn|luci-i18n-firewall-zh-cn|luci-i18n-package-manager-zh-cn|xz-utils|luci-app-store|luci-lib-taskd|luci-lib-xterm|taskd) - ' "$manifest" | tee "$GITHUB_WORKSPACE/results/rt3000-required-packages.txt"
+          find openwrt/bin/targets/qualcommax/ipq50xx -maxdepth 1 -type f -printf '%f %s bytes\n' | tee "$GITHUB_WORKSPACE/results/images.txt"
+
+      - name: Upload firmware images
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rt3000-istoreos-images
+          path: openwrt/bin/targets/qualcommax/ipq50xx/*h3c_rt3000*
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload benchmark logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rt3000-build-benchmark
+          path: results/
+          if-no-files-found: warn
+          retention-days: 7
